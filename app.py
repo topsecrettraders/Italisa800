@@ -85,10 +85,19 @@ class TokenManager:
 
     def refresh_tokens(self):
         try:
-            res = sb_mgr.table("apps").select("*").order("updated_at", desc=True).execute()
+            # Filter specifically for FYERS broker and Enabled status
+            res = sb_mgr.table("apps").select("*")\
+                .eq("broker", "FYERS")\
+                .eq("is_enabled", True)\
+                .order("updated_at", desc=True)\
+                .execute()
+            
             if res.data:
                 self.tokens = [f"{r['app_id']}:{r['access_token']}" for r in res.data if r.get('access_token')]
-                log(f"🔑 Loaded {len(self.tokens)} Access Tokens.")
+                log(f"🔑 Loaded {len(self.tokens)} FYERS Tokens.")
+            else:
+                self.tokens = []
+                log("⚠️ No active FYERS tokens found in DB.")
         except Exception as e:
             log(f"❌ Token Fetch Error: {e}")
 
@@ -498,3 +507,4 @@ if __name__ == "__main__":
     config = uvicorn.Config(app, host="0.0.0.0", port=8000)
     server = uvicorn.Server(config)
     asyncio.run(server.serve())
+
