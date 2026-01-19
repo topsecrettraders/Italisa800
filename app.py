@@ -38,21 +38,17 @@ print(f"🆔 New Run ID: {GLOBAL_RUN_ID}")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # --- ENVIRONMENT VARIABLES (Secrets) ---
-# Defaults provided for testing, but ENV vars take precedence
 SB_URL_MGR = os.environ.get("SB_URL_MGR", "")
 SB_KEY_MGR = os.environ.get("SB_KEY_MGR", "")
 SB_URL_HIST = os.environ.get("SB_URL_HIST", "")
 SB_KEY_HIST = os.environ.get("SB_KEY_HIST", "")
 
 # --- RUNNER CONFIG ---
-# Get Runner ID from Env (Default to 1)
 try:
     RUNNER_ID = int(os.environ.get("RUNNER_ID", 1))
 except:
     RUNNER_ID = 1
 
-# Get Infinite Mode from Env (Default to True)
-# If "true", it ignores task start/end times and runs continuously until the script stops
 inf_env = os.environ.get("INFINITE_MODE", "True").lower()
 INFINITE_MODE = inf_env == "true"
 
@@ -83,12 +79,11 @@ def log(msg):
 
 class TokenManager:
     def __init__(self):
-        self.tokens = [] # List of "appid:accesstoken"
+        self.tokens = [] 
         self.blacklist = set()
         self.refresh_tokens()
 
     def refresh_tokens(self):
-        """Fetches all apps from Supabase, sorted by newest update."""
         try:
             res = sb_mgr.table("apps").select("*").order("updated_at", desc=True).execute()
             if res.data:
@@ -98,10 +93,6 @@ class TokenManager:
             log(f"❌ Token Fetch Error: {e}")
 
     def get_token(self, runner_id, retry_random=False):
-        """
-        Logic: Runner 1 -> Index 0. Runner 2 -> Index 1.
-        If retry_random is True, pick random valid one.
-        """
         available = [t for t in self.tokens if t not in self.blacklist]
         if not available: 
             self.blacklist.clear()
@@ -112,7 +103,6 @@ class TokenManager:
         if retry_random:
             return random.choice(available)
         
-        # Deterministic assignment
         idx = (runner_id - 1) % len(available)
         return available[idx]
 
@@ -132,9 +122,7 @@ adapter = HTTPAdapter(pool_connections=50, pool_maxsize=100, max_retries=retries
 session.mount('https://', adapter)
 
 def fetch_api(url):
-    """Smart Wrapper with Token Rotation"""
     current_token = token_mgr.get_token(RUNNER_ID, retry_random=False)
-    
     for attempt in range(2):
         if not current_token: return None
         try:
@@ -421,7 +409,6 @@ def worker_main(run_id):
             # --- AUTO STOP LOGIC (3:35 PM IST) ---
             if now.hour > stop_hour or (now.hour == stop_hour and now.minute >= stop_min):
                 log("🛑 Market Closed (3:35 PM IST). Shutting down.")
-                # We exit the process so GitHub Actions finishes cleanly
                 os._exit(0) 
 
             current_minute_str = now.strftime("%Y-%m-%d %H:%M:00")
@@ -510,12 +497,4 @@ if __name__ == "__main__":
     
     config = uvicorn.Config(app, host="0.0.0.0", port=8000)
     server = uvicorn.Server(config)
-
-    try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            print("⚠️ Detected existing event loop. Using 'await'.")
-            await server.serve()
-    except RuntimeError:
-        print("🚀 Starting Standard Loop.")
-        asyncio.run(server.serve())
+    asyncio.run(server.serve())
