@@ -38,7 +38,6 @@ print(f"🆔 New Run ID: {GLOBAL_RUN_ID}")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # --- ENVIRONMENT VARIABLES (Secrets) ---
-# Ensure these are set in your environment or Dockerfile
 SB_URL_MGR = os.environ.get("SB_URL_MGR", "")
 SB_KEY_MGR = os.environ.get("SB_KEY_MGR", "")
 SB_URL_HIST = os.environ.get("SB_URL_HIST", "")
@@ -53,7 +52,7 @@ except:
 inf_env = os.environ.get("INFINITE_MODE", "True").lower()
 INFINITE_MODE = inf_env == "true"
 
-print(f"⚙️ Config: Runner={RUNNER_ID} | InfiniteMode={INFINITE_MODE} | Broker=UPSTOX")
+print(f"⚙️ Config: Runner={RUNNER_ID} | InfiniteMode={INFINITE_MODE}")
 
 # --- SUPABASE CLIENTS ---
 if not SB_URL_MGR or not SB_KEY_MGR:
@@ -65,7 +64,6 @@ sb_hist: Client = create_client(SB_URL_HIST, SB_KEY_HIST)
 
 # --- GLOBAL STATE ---
 MASTER_DB = {}
-SEARCH_INDEX = []
 WORKER_STATUS = { "status": "Booting", "logs": [] }
 
 def log(msg):
@@ -76,7 +74,7 @@ def log(msg):
     if len(WORKER_STATUS["logs"]) > 50: WORKER_STATUS["logs"].pop()
 
 # ==========================================
-# 3. ADVANCED TOKEN MANAGER (UPSTOX SPECIFIC)
+# 3. ADVANCED TOKEN MANAGER
 # ==========================================
 
 class TokenManager:
@@ -87,20 +85,19 @@ class TokenManager:
 
     def refresh_tokens(self):
         try:
-            # Filter specifically for UPSTOX broker and Enabled status
+            # Filter specifically for FYERS broker and Enabled status
             res = sb_mgr.table("apps").select("*")\
-                .eq("broker", "UPSTOX")\
+                .eq("broker", "FYERS")\
                 .eq("is_enabled", True)\
                 .order("updated_at", desc=True)\
                 .execute()
             
             if res.data:
-                # Upstox just needs the access token for Bearer auth
-                self.tokens = [r['access_token'] for r in res.data if r.get('access_token')]
-                log(f"🔑 Loaded {len(self.tokens)} UPSTOX Tokens.")
+                self.tokens = [f"{r['app_id']}:{r['access_token']}" for r in res.data if r.get('access_token')]
+                log(f"🔑 Loaded {len(self.tokens)} FYERS Tokens.")
             else:
                 self.tokens = []
-                log("⚠️ No active UPSTOX tokens found in DB (apps table).")
+                log("⚠️ No active FYERS tokens found in DB.")
         except Exception as e:
             log(f"❌ Token Fetch Error: {e}")
 
@@ -120,7 +117,7 @@ class TokenManager:
 
     def report_error(self, token):
         self.blacklist.add(token)
-        log(f"⚠️ Token Blacklisted (Auth Error): {token[:10]}...")
+        log(f"⚠️ Token Blacklisted (Auth Error): {token[:15]}...")
 
 token_mgr = TokenManager()
 
@@ -133,186 +130,101 @@ retries = Retry(total=3, backoff_factor=0.05, status_forcelist=[500, 502, 503, 5
 adapter = HTTPAdapter(pool_connections=50, pool_maxsize=100, max_retries=retries)
 session.mount('https://', adapter)
 
-def fetch_api(instrument_keys):
-    """
-    Fetches quotes for a comma-separated string of instrument keys.
-    """
-    url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={instrument_keys}"
+def fetch_api(url):
     current_token = token_mgr.get_token(RUNNER_ID, retry_random=False)
-    
     for attempt in range(2):
         if not current_token: return None
         try:
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Accept": "application/json"
-            }
+            headers = {"Authorization": current_token}
             r = session.get(url, headers=headers, timeout=2.0)
-            
             if r.status_code == 200:
                 d = r.json()
-                if d.get('status') == 'success': 
-                    return d['data']
+                if d.get('s') == 'ok': return d['d']
             
             if r.status_code in [401, 403]:
                 token_mgr.report_error(current_token)
                 current_token = token_mgr.get_token(RUNNER_ID, retry_random=True)
                 continue 
-        except Exception as e:
-            pass
+        except: pass
     return None
 
 # ==========================================
-# 5. MASTER DATA & SYMBOLS (FROM UPSTOX APP.PY3)
+# 5. MASTER DATA & SYMBOLS
 # ==========================================
 
-# Manual mapping for Index Spot Keys
 INDEX_MAP = {
-    "NIFTY": "NSE_INDEX|Nifty 50",
-    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
-    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
-    "SENSEX": "BSE_INDEX|SENSEX",
-    "BANKEX": "BSE_INDEX|BANKEX",
-    "SENSEX50": "BSE_INDEX|SENSEX50"
+    "NIFTY": "NSE:NIFTY50-INDEX", "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX", "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "SENSEX": "BSE:SENSEX-INDEX", "BANKEX": "BSE:BANKEX-INDEX"
 }
 
+def get_root_symbol(desc: str, symbol: str) -> str:
+    if desc and len(desc.strip()) > 1:
+        try: return desc.strip().split(' ')[0].upper().replace(':', '').replace('-', '')
+        except: pass
+    if ':' in symbol: return symbol.split(':')[1]
+    return symbol
+
 def update_master_db():
-    global MASTER_DB, SEARCH_INDEX
-    log("📥 Downloading Upstox Master Data (NSE, BSE, MCX)...")
-    
+    global MASTER_DB
+    log("📥 Downloading Master Data...")
     try:
-        # 1. NSE
-        url_nse = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-        df_nse = pd.read_json(url_nse, compression='gzip')
+        urls = [
+            ("https://public.fyers.in/sym_details/NSE_FO.csv", "NSE"),
+            ("https://public.fyers.in/sym_details/BSE_FO.csv", "BSE"),
+            ("https://public.fyers.in/sym_details/MCX_COM.csv", "MCX")
+        ]
         
-        # 2. BSE
-        url_bse = "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz"
-        df_bse = pd.read_json(url_bse, compression='gzip')
+        dfs = []
+        def fetch_csv(args):
+            u, ex = args
+            return pd.read_csv(u, usecols=[0,1,8,9,13], names=['Token','Desc','Expiry','Symbol','Inst'], header=0, on_bad_lines='skip'), ex
 
-        # 3. MCX
-        url_mcx = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
-        df_mcx = pd.read_json(url_mcx, compression='gzip')
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(fetch_csv, urls))
+        
+        for df_res, exch in results:
+            df_res['Exch'] = exch
+            dfs.append(df_res)
 
-        # Combine all exchanges
-        df = pd.concat([df_nse, df_bse, df_mcx], ignore_index=True)
-        
-        # Filter relevant segments
-        mask = df['segment'].isin(['NSE_FO', 'BSE_FO', 'MCX_FO', 'NSE_INDEX', 'BSE_INDEX', 'NSE_EQ'])
-        df = df[mask]
-        
+        df = pd.concat(dfs, ignore_index=True)
         temp_db = {}
-        spot_lookup = {}
-
-        # STEP 1: Build Spot Lookup
+        
         for _, row in df.iterrows():
-            seg = row['segment']
-            if seg == 'NSE_EQ':
-                sym = str(row['trading_symbol']).strip().upper()
-                key = row['instrument_key']
-                spot_lookup[sym] = key
-            elif seg == 'NSE_INDEX' or seg == 'BSE_INDEX':
-                sym = str(row['trading_symbol']).strip().upper()
-                key = row['instrument_key']
-                spot_lookup[sym] = key
-                name = str(row['name']).strip().upper()
-                spot_lookup[name] = key
-
-        # STEP 2: Build Derivatives Chain
-        for _, row in df.iterrows():
-            seg = row['segment']
-            if seg not in ['NSE_FO', 'BSE_FO', 'MCX_FO']: 
-                continue 
+            sym = str(row['Symbol'])
+            desc = str(row['Desc'])
+            root = get_root_symbol(desc, sym)
             
-            sym = row['trading_symbol']
-            key = row['instrument_key']
+            if root not in temp_db:
+                spot = INDEX_MAP.get(root, f"NSE:{root}-EQ")
+                if row['Exch'] == "MCX": spot = "MCX"
+                temp_db[root] = { "spot": spot, "items": [] }
             
-            # Identify Root
-            root = ""
-            us = row.get('underlying_symbol')
-            if pd.notna(us) and str(us).strip() != "":
-                root = str(us).strip().upper()
-            if not root:
-                asym = row.get('asset_symbol')
-                if pd.notna(asym) and str(asym).strip() != "":
-                    root = str(asym).strip().upper()
-            if not root:
-                nm = row.get('name')
-                if pd.notna(nm):
-                    root = str(nm).strip().upper()
-
-            clean_root = root.replace(' ', '') 
-
-            # Initialize DB Entry
-            if clean_root not in temp_db:
-                spot_key = ""
-                if clean_root in INDEX_MAP: spot_key = INDEX_MAP[clean_root]
-                elif root in spot_lookup: spot_key = spot_lookup[root]
-                elif clean_root in spot_lookup: spot_key = spot_lookup[clean_root]
-                
-                exch_code = seg.split('_')[0] 
-                display_name = row['name'] if pd.notna(row['name']) else root
-
-                temp_db[clean_root] = { 
-                    "spot": spot_key, 
-                    "exch": exch_code, 
-                    "name": display_name, 
-                    "items": [] 
-                }
-
-            inst_type = row.get('instrument_type', '') 
+            try: exp = int(row['Expiry'])
+            except: exp = 0
             
-            # Parse Expiry
-            exp = 0
-            raw_exp = row.get('expiry')
-            if pd.notna(raw_exp):
-                try:
-                    if isinstance(raw_exp, (int, float)):
-                        exp = int(raw_exp / 1000)
-                    elif isinstance(raw_exp, str):
-                        dt = datetime.strptime(raw_exp, "%Y-%m-%d")
-                        exp = int(dt.replace(tzinfo=None).timestamp())
+            opt_type = "FUT"
+            strike = 0.0
+            if "CE" in sym or "PE" in sym:
+                try: 
+                    parts = desc.strip().split(' ')
+                    if len(parts) >= 2:
+                        strike = float(parts[-2])
+                        opt_type = parts[-1]
                 except: pass
+            
+            temp_db[root]["items"].append({ "s": sym, "e": exp, "k": strike, "t": opt_type })
 
-            strike = float(row.get('strike_price', 0.0))
-            
-            t_mapped = "FUT"
-            if inst_type == "CE": t_mapped = "CE"
-            elif inst_type == "PE": t_mapped = "PE"
-            elif inst_type in ["FUTIDX", "FUTSTK", "FUTCOM", "FUTBLN", "FUTENR"]: t_mapped = "FUT"
-            
-            temp_db[clean_root]["items"].append({
-                "s": key,       
-                "dis": sym,     
-                "e": exp,       
-                "k": strike,    
-                "t": t_mapped   
-            })
-
-        # Finalize
-        final_db = {}
-        for root, data in temp_db.items():
-            if not data["items"]: continue
-            sorted_items = sorted(data["items"], key=lambda x: (x['e'], x['k']))
-            final_db[root] = { 
-                "spot": data["spot"], 
-                "exch": data["exch"], 
-                "items": sorted_items 
-            }
-            
-        MASTER_DB = final_db
+        MASTER_DB = temp_db
         log(f"✅ Master DB Ready: {len(MASTER_DB)} Roots")
-
     except Exception as e:
         log(f"❌ Master DB Error: {e}")
 
-def get_ltp_sync(instrument_key):
-    """
-    Get a single LTP synchronously for calculation purposes.
-    """
-    d = fetch_api(instrument_key)
-    if d and instrument_key in d:
-        return d[instrument_key].get('last_price', 0)
+def get_ltp_sync(symbol):
+    u = f"https://api-t1.fyers.in/data/depth?symbol={symbol}&ohlcv_flag=1"
+    d = fetch_api(u)
+    if d and symbol in d:
+        return d[symbol].get('ltp', 0)
     return 0
 
 # ==========================================
@@ -354,36 +266,25 @@ class DataEngine:
             return [], "SKIPPED"
 
         payload = task['full_payload']
-        # Task root usually comes as "NSE:NIFTY" or just "NIFTY". 
-        # Upstox MasterDB keys are clean roots (e.g. "NIFTY", "RELIANCE").
         raw_root = payload['root']
+        root_name = get_root_symbol("", raw_root)
         
-        # Clean the root to match Master DB keys
-        if ':' in raw_root: root_name = raw_root.split(':')[1].upper()
-        else: root_name = raw_root.upper()
-        
-        if root_name not in MASTER_DB: 
-            # Try removing spaces just in case
-            root_name = root_name.replace(' ', '')
-            if root_name not in MASTER_DB:
-                return [], "ERROR_ROOT_NOT_FOUND"
+        if root_name not in MASTER_DB: return [], "ERROR"
 
         db_entry = MASTER_DB[root_name]
         items = db_entry["items"]
-        spot_sym = db_entry["spot"]
         
-        # Get Futures
+        spot_sym = db_entry["spot"]
         futs = sorted([x for x in items if x['t'] == 'FUT'], key=lambda x: x['e'])
         future_syms = [x['s'] for x in futs[:3]]
         
-        # Determine Reference Symbol for ATM calculation
         ref_sym = spot_sym
-        if not ref_sym:
+        if not ref_sym or ref_sym == "MCX" or ref_sym == "None":
             if futs: ref_sym = futs[0]['s']
-            else: return [], "ERROR_NO_REF"
+            else: return [], "ERROR"
             
         watch_list = []
-        if spot_sym: watch_list.append(spot_sym)
+        if spot_sym and spot_sym != "MCX": watch_list.append(spot_sym)
         watch_list.extend(future_syms)
         
         config = payload.get('config', {})
@@ -410,7 +311,6 @@ class DataEngine:
                      if valid_exps: target_exp = valid_exps[-1] 
 
                 if target_exp:
-                    # Format expiry label YYYY-MM-DD
                     expiry_label = datetime.fromtimestamp(target_exp).strftime('%Y-%m-%d')
                     opts = [x for x in items if x['e'] == target_exp and x['t'] in ['CE', 'PE']]
                     strikes = sorted(list(set([x['k'] for x in opts])))
@@ -435,7 +335,7 @@ class DataEngine:
             
             if syms:
                 self.tasks_meta[t_id] = {
-                    "root": task['full_payload']['root'], # Keep original root string from task
+                    "root": get_root_symbol("", task['full_payload']['root']),
                     "symbols": syms,
                     "label": label
                 }
@@ -455,28 +355,25 @@ class DataEngine:
     def fetch_slot(self, slot_index):
         if not self.fetch_list: return
         
-        # Upstox supports comma separated keys. 
-        # Safe limit is around 50-100.
         chunk_size = 50
         chunks = [self.fetch_list[i:i + chunk_size] for i in range(0, len(self.fetch_list), chunk_size)]
         
         def _req(batch):
-            return fetch_api(",".join(batch))
+            u = f"https://api-t1.fyers.in/data/depth?symbol={','.join(batch)}&ohlcv_flag=1"
+            return fetch_api(u)
 
         with ThreadPoolExecutor(max_workers=20) as ex:
             results = list(ex.map(_req, chunks))
         
         for res in results:
             if not res: continue 
-            # Upstox returns data keyed by instrument_key
-            for instr_key, data in res.items():
-                if instr_key in self.storage:
-                    # Upstox JSON structure mapping based on upstox_data_example.txt
-                    self.storage[instr_key]["p"][slot_index] = data.get('last_price')
-                    self.storage[instr_key]["v"][slot_index] = data.get('volume')
-                    self.storage[instr_key]["o"][slot_index] = data.get('oi')
-                    self.storage[instr_key]["b"][slot_index] = data.get('total_buy_quantity')
-                    self.storage[instr_key]["s"][slot_index] = data.get('total_sell_quantity')
+            for sym, data in res.items():
+                if sym in self.storage:
+                    self.storage[sym]["p"][slot_index] = data.get('ltp')
+                    self.storage[sym]["v"][slot_index] = data.get('v')
+                    self.storage[sym]["o"][slot_index] = data.get('oi')
+                    self.storage[sym]["b"][slot_index] = data.get('totalbuyqty')
+                    self.storage[sym]["s"][slot_index] = data.get('totalsellqty')
 
     def get_bucket_data(self, task_id):
         if task_id not in self.tasks_meta: return None, None
@@ -489,21 +386,7 @@ class DataEngine:
         has_data = False
         for sym in syms:
             if sym in self.storage:
-                # Handle Special Naming for Indices exactly like PHP viewer expects
-                # PHP Code: saveKey = k.includes('|') ? k.split('|')[1] : k;
-                # Upstox Keys: NSE_INDEX|Nifty 50 -> "Nifty 50" or "NSE_FO|..." -> "NSE_FO|..."
-                
-                save_key = sym
-                if "NSE_INDEX" in sym or "BSE_INDEX" in sym:
-                     if '|' in sym: save_key = sym.split('|')[1]
-                
-                # Check for "NA" symbol issue mentioned in prompts
-                if save_key == "NA" and '|' in sym:
-                     save_key = sym.split('|')[1]
-
-                subset[save_key] = self.storage[sym]
-                
-                # Check if we actually got data (price not None)
+                subset[sym] = self.storage[sym]
                 if any(x is not None for x in self.storage[sym]['p']):
                     has_data = True
         
@@ -516,8 +399,6 @@ class DataEngine:
 
 def worker_main(run_id):
     log(f"🚀 Worker Started ({run_id}) | Mode: {'INFINITE' if INFINITE_MODE else 'SCHEDULED'}")
-    
-    # Initial Master DB Load
     update_master_db()
     
     engine = DataEngine()
@@ -535,7 +416,7 @@ def worker_main(run_id):
             now = datetime.now(IST)
             
             # --- AUTO STOP LOGIC (3:35 PM IST) ---
-            if not INFINITE_MODE and (now.hour > stop_hour or (now.hour == stop_hour and now.minute >= stop_min)):
+            if now.hour > stop_hour or (now.hour == stop_hour and now.minute >= stop_min):
                 log("🛑 Market Closed (3:35 PM IST). Shutting down.")
                 os._exit(0) 
 
@@ -545,9 +426,8 @@ def worker_main(run_id):
             if active_minute_str and current_minute_str != active_minute_str:
                 log(f"💾 End of Minute {active_minute_str}. Flushing...")
                 
-                # 1. Fetch Tasks (Hot Reload)
-                # Note: Table name is worker_tasks_upstox
-                res = sb_mgr.table("worker_tasks_upstox").select("*").eq("runner_group", RUNNER_ID).execute()
+                # 1. Hot Reload Tasks
+                res = sb_mgr.table("worker_tasks").select("*").eq("runner_group", RUNNER_ID).execute()
                 tasks = res.data
                 
                 buckets = []
@@ -558,10 +438,10 @@ def worker_main(run_id):
                         payload["minute"] = active_minute_str
                         buckets.append(payload)
                 
-                # 3. Upload to history_buckets_upstox
+                # 3. Upload
                 if buckets:
                     try:
-                        sb_hist.table("history_buckets_upstox").upsert(buckets, on_conflict="root,expiry,minute").execute()
+                        sb_hist.table("history_buckets").upsert(buckets, on_conflict="root,expiry,minute").execute()
                         log(f"☁️ Uploaded {len(buckets)} Buckets.")
                     except Exception as e:
                         log(f"❌ Upload Error: {e}")
@@ -581,9 +461,7 @@ def worker_main(run_id):
             if current_slot > 5: current_slot = 5
             
             if current_slot not in processed_slots:
-                # Sync alignment
                 if now.second % 10 == 0: time.sleep(0.2) 
-                
                 engine.fetch_slot(current_slot)
                 processed_slots.add(current_slot)
             
@@ -610,7 +488,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 def status():
     return HTMLResponse(f"""
     <html><body style="background:#111; color:#0f0; font-family:monospace; padding:20px;">
-    <h2>🟢 Upstox Worker {RUNNER_ID} Active</h2>
+    <h2>🟢 Worker {RUNNER_ID} Active</h2>
     <div><strong>Run ID:</strong> {GLOBAL_RUN_ID}</div>
     <div><strong>Mode:</strong> {'INFINITE 24/7' if INFINITE_MODE else 'SCHEDULED'}</div>
     <div><strong>Tokens:</strong> {len(token_mgr.tokens)} available</div>
@@ -629,3 +507,5 @@ if __name__ == "__main__":
     config = uvicorn.Config(app, host="0.0.0.0", port=8000)
     server = uvicorn.Server(config)
     asyncio.run(server.serve())
+
+
