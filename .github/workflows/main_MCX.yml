@@ -1,0 +1,59 @@
+name: 3 Specific Fyers Runners (20-22)
+
+on:
+  # 1. Manual Trigger
+  workflow_dispatch:
+  
+  # 2. Scheduled Triggers (UTC Time)
+  schedule:
+    # 7:20 AM IST (01:50 UTC)
+    - cron: '50 1 * * *'
+    
+    # 1:20 PM IST (07:50 UTC)
+    - cron: '50 7 * * *'
+
+    # 7:20 PM IST (13:50 UTC)
+    - cron: '50 13 * * *'
+
+jobs:
+  run-workers:
+    name: Runner ${{ matrix.runner_id }}
+    runs-on: ubuntu-latest
+    
+    # Run only these 3 specific runners in parallel
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [20, 21, 22]
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install fastapi uvicorn supabase pandas requests nest_asyncio python-multipart
+
+    - name: Execute Worker Script
+      env:
+        # --- SECRETS MAPPED TO ENV ---
+        SB_URL_MGR: ${{ secrets.SB_URL_MGR }}
+        SB_KEY_MGR: ${{ secrets.SB_KEY_MGR }}
+        SB_URL_HIST: ${{ secrets.SB_URL_HIST }}
+        SB_KEY_HIST: ${{ secrets.SB_KEY_HIST }}
+        
+        # --- DYNAMIC CONFIG ---
+        RUNNER_ID: ${{ matrix.runner_id }}
+        INFINITE_MODE: "True"
+        STOP_TIME_IST: "00:00" 
+      
+      # Timeout set to 400 mins to ensure it runs until midnight if needed
+      timeout-minutes: 400
+      
+      run: |
+        python app.py
