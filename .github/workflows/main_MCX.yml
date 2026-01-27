@@ -1,4 +1,4 @@
-name: 3 Specific Fyers Runners (20-22)
+name: MCX Runners 20 to 23
 
 on:
   # 1. Manual Trigger
@@ -56,4 +56,4 @@ jobs:
       timeout-minutes: 400
       
       run: |
-        python app.py
+        python app_mcx.py
