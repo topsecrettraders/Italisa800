@@ -50,7 +50,7 @@ jobs:
         # --- DYNAMIC CONFIG ---
         RUNNER_ID: ${{ matrix.runner_id }}
         INFINITE_MODE: "True"
-        STOP_TIME_IST: "00:00" 
+        STOP_TIME_IST: "23:59" 
       
       # Timeout set to 400 mins to ensure it runs until midnight if needed
       timeout-minutes: 400
