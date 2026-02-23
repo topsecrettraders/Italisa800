@@ -53,4 +53,4 @@ jobs:
       timeout-minutes: 400
       
       run: |
-        python app fyers websocket.py
+        python app_fyers_websocket.py
