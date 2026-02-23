@@ -1,0 +1,56 @@
+name: 10 Concurrent Fyers Runners
+
+on:
+  # 1. Manual Trigger (Run whenever you want)
+  workflow_dispatch:
+  
+  # 2. Scheduled Triggers (UTC Time)
+  schedule:
+    # Morning: 03:25 UTC = 08:55 AM IST (Ready for 9:10 AM)
+    - cron: '25 3 * * *'
+    
+    # Afternoon: 09:15 UTC = 02:45 PM IST (Ready for 3:00 PM)
+    - cron: '15 9 * * *'
+
+jobs:
+  run-workers:
+    name: Runner ${{ matrix.runner_id }}
+    runs-on: ubuntu-latest
+    
+    # This matrix runs 10 copies of the job in parallel
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [1, 2, 3, 4, 5]
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install fastapi uvicorn supabase pandas requests nest_asyncio python-multipart
+
+    - name: Execute Worker Script
+      env:
+        # --- SECRETS MAPPED TO ENV ---
+        SB_URL_MGR: ${{ secrets.SB_URL_MGR }}
+        SB_KEY_MGR: ${{ secrets.SB_KEY_MGR }}
+        SB_URL_HIST: ${{ secrets.SB_URL_HIST }}
+        SB_KEY_HIST: ${{ secrets.SB_KEY_HIST }}
+        
+        # --- DYNAMIC CONFIG ---
+        RUNNER_ID: ${{ matrix.runner_id }}
+        INFINITE_MODE: "True"
+      
+      # Timeout set to 400 mins (6h 40m) to ensure it covers the full market session 
+      # The script itself has logic to auto-exit at 3:35 PM IST
+      timeout-minutes: 400
+      
+      run: |
+        python app fyers websocket.py
