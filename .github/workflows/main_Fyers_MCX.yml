@@ -1,4 +1,4 @@
-name:  Fyers Runners
+name:  Fyers Runners MCX
 
 on:
   # 1. Manual Trigger (Run whenever you want)
@@ -6,12 +6,14 @@ on:
   
   # 2. Scheduled Triggers (UTC Time)
   schedule:
-    # Morning: 03:25 UTC = 08:55 AM IST (Ready for 9:10 AM)
-    - cron: '25 3 * * *'
+    # 7:20 AM IST (01:50 UTC)
+    - cron: '50 1 * * *'
     
-    # Afternoon: 09:15 UTC = 02:45 PM IST (Ready for 3:00 PM)
-    - cron: '15 9 * * *'
+    # 1:20 PM IST (07:50 UTC)
+    - cron: '50 7 * * *'
 
+    # 7:20 PM IST (13:50 UTC)
+    - cron: '50 13 * * *'
 jobs:
   run-workers:
     name: Runner ${{ matrix.runner_id }}
