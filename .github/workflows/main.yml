@@ -1,4 +1,4 @@
-name: 10 Concurrent Fyers Runners
+name: 10 Concurrent Upstox Runners
 
 on:
   # 1. Manual Trigger (Run whenever you want)
