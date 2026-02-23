@@ -376,7 +376,8 @@ def worker_main(run_id):
                 if active_minute_str is not None:
                     log(f"💾 End of Minute {active_minute_str}. Formatting Buckets...")
                     
-                    buckets = []
+                    # CHANGED: Use a dictionary to eliminate duplicate composite keys natively
+                    unique_buckets = {}
                     for task_id, meta in TASK_MAP.items():
                         root = meta["root"]
                         label = meta["label"]
@@ -388,12 +389,18 @@ def worker_main(run_id):
                                 subset[sym] = MINUTE_BUFFER[sym]
                                 
                         if subset:
-                            buckets.append({
+                            # Unique key for DB constraint (root + expiry + minute)
+                            bucket_key = (root, label, active_minute_str)
+                            
+                            # If duplicate exists, this simply overwrites it (keeping the latest one)
+                            unique_buckets[bucket_key] = {
                                 "root": root,
                                 "expiry": label,
                                 "minute": active_minute_str,
                                 "data": subset
-                            })
+                            }
+                            
+                    buckets = list(unique_buckets.values())
                             
                     if buckets:
                         try:
