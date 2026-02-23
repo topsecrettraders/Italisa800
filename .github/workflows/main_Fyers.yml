@@ -17,7 +17,7 @@ jobs:
     name: Runner ${{ matrix.runner_id }}
     runs-on: ubuntu-latest
     
-    # This matrix runs 10 copies of the job in parallel
+    # This matrix runs 5 copies of the job in parallel (change array to add more)
     strategy:
       fail-fast: false
       matrix:
@@ -32,17 +32,21 @@ jobs:
       with:
         python-version: '3.10'
 
+    # ADDED fyers-apiv3 HERE
     - name: Install Dependencies
       run: |
-        pip install fastapi uvicorn supabase pandas requests nest_asyncio python-multipart
+        python -m pip install --upgrade pip
+        pip install fastapi uvicorn supabase pandas requests nest_asyncio python-multipart fyers-apiv3
 
     - name: Execute Worker Script
       env:
         # --- SECRETS MAPPED TO ENV ---
         SB_URL_MGR: ${{ secrets.SB_URL_MGR }}
         SB_KEY_MGR: ${{ secrets.SB_KEY_MGR }}
-        SB_URL_HIST: ${{ secrets.SB_URL_HIST_FYERS }}
-        SB_KEY_HIST: ${{ secrets.SB_KEY_HIST_FYERS }}
+        
+        # CORRECTED to match the Python script's os.environ.get()
+        SB_URL_HIST_FYERS: ${{ secrets.SB_URL_HIST_FYERS }}
+        SB_KEY_HIST_FYERS: ${{ secrets.SB_KEY_HIST_FYERS }}
         
         # --- DYNAMIC CONFIG ---
         RUNNER_ID: ${{ matrix.runner_id }}
