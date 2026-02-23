@@ -5,4 +5,4 @@ pandas
 requests
 nest_asyncio
 python-multipart
-fyers_apiv3
+fyers-apiv3
