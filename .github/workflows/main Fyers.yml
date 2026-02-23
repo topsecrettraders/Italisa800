@@ -41,8 +41,8 @@ jobs:
         # --- SECRETS MAPPED TO ENV ---
         SB_URL_MGR: ${{ secrets.SB_URL_MGR }}
         SB_KEY_MGR: ${{ secrets.SB_KEY_MGR }}
-        SB_URL_HIST: ${{ secrets.SB_URL_HIST }}
-        SB_KEY_HIST: ${{ secrets.SB_KEY_HIST }}
+        SB_URL_HIST: ${{ secrets.SB_URL_HIST_fyers }}
+        SB_KEY_HIST: ${{ secrets.SB_KEY_HIST_fyers }}
         
         # --- DYNAMIC CONFIG ---
         RUNNER_ID: ${{ matrix.runner_id }}
