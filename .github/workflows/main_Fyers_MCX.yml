@@ -55,7 +55,7 @@ jobs:
         INFINITE_MODE: "True"
       
       # Timeout set to 400 mins (6h 40m) to ensure it covers the full market session 
-      # The script itself has logic to auto-exit at 3:35 PM IST
+      # The script itself has logic to auto-exit at 11:59 PM IST
       timeout-minutes: 400
       
       run: |
