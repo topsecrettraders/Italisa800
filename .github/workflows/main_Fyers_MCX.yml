@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner_id: [1, 2, 3, 4]
+        runner_id: [40]
 
     steps:
     - name: Checkout Code
