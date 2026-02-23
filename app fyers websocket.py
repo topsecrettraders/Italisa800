@@ -33,8 +33,8 @@ IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 # --- ENVIRONMENT VARIABLES ---
 SB_URL_MGR = os.environ.get("SB_URL_MGR", "")
 SB_KEY_MGR = os.environ.get("SB_KEY_MGR", "")
-SB_URL_HIST = os.environ.get("SB_URL_HIST_fyers", "")
-SB_KEY_HIST = os.environ.get("SB_KEY_HIST_fyers", "")
+SB_URL_HIST = os.environ.get("SB_URL_HIST_FYERS", "")
+SB_KEY_HIST = os.environ.get("SB_KEY_HIST_FYERS", "")
 
 try:
     RUNNER_ID = int(os.environ.get("RUNNER_ID", 1))
