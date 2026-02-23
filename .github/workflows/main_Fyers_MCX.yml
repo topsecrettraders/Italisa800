@@ -57,4 +57,4 @@ jobs:
       timeout-minutes: 400
       
       run: |
-        python app_fyers_websocket.py
+        python app_fyers_websocket_MCX.py
