@@ -79,6 +79,24 @@ def log(msg):
     WORKER_STATUS["logs"].insert(0, entry)
     if len(WORKER_STATUS["logs"]) > 100: WORKER_STATUS["logs"].pop()
 
+# --- HELPER: CLEAN PRICE (FIX FLOATING POINT NOISE) ---
+def clean_price(val):
+    """
+    Rounds to 2 decimals to remove artifacts like .900000001.
+    If the result is a whole number, returns int (no decimal).
+    """
+    if val is None: return 0
+    try:
+        val = float(val)
+        # Round to 2 decimals to kill the 99999 noise
+        rounded = round(val, 2)
+        # If it's a whole number (e.g. 25000.0), return integer 25000
+        if rounded.is_integer():
+            return int(rounded)
+        return rounded
+    except:
+        return val
+
 # ==============================================================================
 # 4. DATA FETCHERS
 # ==============================================================================
@@ -462,7 +480,10 @@ def worker_main(run_id):
                     
                     # Only record if we actually have data
                     if state['ltp'] > 0:
-                        MINUTE_BUFFER[sym]['p'][current_slot] = state['ltp']
+                        # ----------------------------------------------------
+                        # FIX APPLIED HERE: Clean Price using helper function
+                        # ----------------------------------------------------
+                        MINUTE_BUFFER[sym]['p'][current_slot] = clean_price(state['ltp'])
                         MINUTE_BUFFER[sym]['v'][current_slot] = state['vol']
                         MINUTE_BUFFER[sym]['o'][current_slot] = state['oi']
                         MINUTE_BUFFER[sym]['b'][current_slot] = state['b']
