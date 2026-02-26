@@ -56,6 +56,7 @@ MASTER_DB = {}
 STATE_MEMORY = defaultdict(lambda: {"ltp": 0, "vol": 0, "oi": None, "b": 0, "s": 0})
 MINUTE_BUFFER = defaultdict(lambda: {"p": [None]*6, "v": [None]*6, "o": [None]*6, "b": [None]*6, "s": [None]*6})
 TASK_MAP = {}
+TASK_ANCHORS = {} # Holds dynamic shift thresholds
 ALL_TRACKED_SYMBOLS = set()
 
 # Websocket Control
@@ -63,7 +64,7 @@ FS = None
 SOCKET_RUNNING = False
 WS_THREAD = None
 
-WORKER_STATUS = { "status": "Booting", "logs": [] }
+WORKER_STATUS = { "status": "Booting", "logs":[] }
 
 INDEX_MAP = {
     "NIFTY": "NSE:NIFTY50-INDEX", "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
@@ -103,7 +104,6 @@ def clean_price(val):
 
 def get_fyers_token():
     try:
-        # Fetch the most recently updated active FYERS token
         res = sb_mgr.table('apps').select("*").eq("broker", "FYERS").eq("is_enabled", True).order("updated_at", desc=True).limit(1).execute()
         if res.data: 
             return f"{res.data[0]['app_id']}:{res.data[0]['access_token']}"
@@ -137,7 +137,7 @@ def download_master():
                 spot_sym = INDEX_MAP.get(root, f"NSE:{root}-EQ")
                 if row['Exch'] == "MCX": spot_sym = "MCX" 
                 elif row['Exch'] == "BSE": spot_sym = f"BSE:{root}"
-                temp_db[root] = { "spot": spot_sym, "exch": row['Exch'], "items": [] }
+                temp_db[root] = { "spot": spot_sym, "exch": row['Exch'], "items":[] }
 
             try: exp = int(row['Expiry'])
             except: exp = 0
@@ -173,15 +173,16 @@ def fetch_price(token, symbol):
 # ==============================================================================
 
 def resolve_symbols(token, tasks):
-    global TASK_MAP, ALL_TRACKED_SYMBOLS
+    global TASK_MAP, ALL_TRACKED_SYMBOLS, TASK_ANCHORS
     if not MASTER_DB: download_master()
     
     new_task_map = {}
     new_tracked_symbols = set()
+    new_task_anchors = {}
     
     for t in tasks:
         task_id = t.get('task_id', f"unknown_{int(time.time())}")
-        task_subs = [] 
+        task_subs =[] 
         expiry_label = "MARKET"
         
         raw_root = t.get('full_payload', {}).get('root', '')
@@ -266,9 +267,29 @@ def resolve_symbols(token, tasks):
                         if strikes:
                             atm = min(strikes, key=lambda x: abs(x - current_ref_price))
                             atm_idx = strikes.index(atm)
-                            start = max(0, atm_idx - rng)
-                            end = min(len(strikes), atm_idx + rng + 1)
+                            
+                            # --- CUSHION STRATEGY LOGIC (+10) ---
+                            cushion = 10 
+                            start = max(0, atm_idx - rng - cushion)
+                            end = min(len(strikes), atm_idx + rng + cushion + 1)
                             target_strikes = strikes[start:end]
+
+                            # Calculate gap dynamically (e.g. 50 for Nifty, 100 for BankNifty)
+                            gap = 50 
+                            if len(strikes) > 1: gap = strikes[1] - strikes[0]
+                            
+                            # Determine Reference Symbol for tracking live price later
+                            ref_sym_to_track = spot_sym if using_spot else (matched_fut['s'] if matched_fut else (all_futs[0]['s'] if all_futs else None))
+
+                            # Store Anchor Metadata for Dynamic Re-Subscription
+                            new_task_anchors[task_id] = {
+                                "ref_sym": ref_sym_to_track,
+                                "anchor_price": current_ref_price,
+                                "gap": gap,
+                                "rng": rng,
+                                "strikes": strikes,
+                                "options_meta": options
+                            }
 
                             final_opts = [x['s'] for x in options if x['k'] in target_strikes]
                             for f in final_opts:
@@ -283,6 +304,7 @@ def resolve_symbols(token, tasks):
             new_tracked_symbols.update(task_subs)
 
     TASK_MAP = new_task_map
+    TASK_ANCHORS = new_task_anchors
     ALL_TRACKED_SYMBOLS = new_tracked_symbols
     return list(ALL_TRACKED_SYMBOLS)
 
@@ -357,7 +379,6 @@ def start_websocket(token, symbols):
         on_message=on_message
     )
     
-    # Run WS connection in a separate thread so it doesn't block main loop
     ws_thread = threading.Thread(target=FS.connect, daemon=True)
     ws_thread.start()
 
@@ -366,6 +387,7 @@ def start_websocket(token, symbols):
 # ==============================================================================
 
 def worker_main(run_id):
+    global last_tasks_hash, ALL_TRACKED_SYMBOLS
     log(f"🚀 FYERS Worker Started ({run_id}) | Runner: {RUNNER_ID}")
     download_master()
     
@@ -389,28 +411,48 @@ def worker_main(run_id):
 
             current_minute_str = now.strftime("%Y-%m-%d %H:%M:00")
             
-            # --- MINUTE FLUSH & TASK CHECK ---
+            # --- MINUTE FLUSH & STRICT SAVE CHECK ---
             if active_minute_str != current_minute_str:
                 if active_minute_str is not None:
                     log(f"💾 End of Minute {active_minute_str}. Formatting Buckets...")
                     
-                    # CHANGED: Use a dictionary to eliminate duplicate composite keys natively
                     unique_buckets = {}
                     for task_id, meta in TASK_MAP.items():
                         root = meta["root"]
                         label = meta["label"]
                         task_symbols = meta["symbols"]
                         
+                        # --- STRICT FILTER LOGIC ---
+                        # Dump the cushion, save strictly the ATM ± range
+                        strict_symbols = set(task_symbols) 
+                        if task_id in TASK_ANCHORS:
+                            tm = TASK_ANCHORS[task_id]
+                            live_p = tm["anchor_price"]
+                            if tm["ref_sym"] and tm["ref_sym"] in STATE_MEMORY and STATE_MEMORY[tm["ref_sym"]]['ltp'] > 0:
+                                live_p = STATE_MEMORY[tm["ref_sym"]]['ltp']
+                            
+                            strikes = tm["strikes"]
+                            rng = tm["rng"]
+                            if strikes and rng > 0:
+                                latm = min(strikes, key=lambda x: abs(x - live_p))
+                                latm_idx = strikes.index(latm)
+                                
+                                s_start = max(0, latm_idx - rng)
+                                s_end = min(len(strikes), latm_idx + rng + 1)
+                                strict_strikes = strikes[s_start:s_end]
+                                
+                                strict_opts = [x['s'] for x in tm["options_meta"] if x['k'] in strict_strikes]
+                                # Keep Equities/Indexes/Futures but strictly limit Options to ±rng
+                                strict_symbols = set([s for s in task_symbols if "-EQ" in s or "INDEX" in s or "FUT" in s] + strict_opts)
+
+                        # Form the final subset using ONLY strict_symbols
                         subset = {}
                         for sym in task_symbols:
-                            if sym in MINUTE_BUFFER and any(p is not None for p in MINUTE_BUFFER[sym]['p']):
+                            if sym in strict_symbols and sym in MINUTE_BUFFER and any(p is not None for p in MINUTE_BUFFER[sym]['p']):
                                 subset[sym] = MINUTE_BUFFER[sym]
                                 
                         if subset:
-                            # Unique key for DB constraint (root + expiry + minute)
                             bucket_key = (root, label, active_minute_str)
-                            
-                            # If duplicate exists, this simply overwrites it (keeping the latest one)
                             unique_buckets[bucket_key] = {
                                 "root": root,
                                 "expiry": label,
@@ -422,7 +464,6 @@ def worker_main(run_id):
                             
                     if buckets:
                         try:
-                            # Upsert to avoid 23505 constraints
                             sb_hist.table("history_buckets_fyers").upsert(buckets, on_conflict="root,expiry,minute").execute()
                             log(f"☁️ Uploaded {len(buckets)} Fyers Buckets to DB.")
                         except Exception as e:
@@ -435,34 +476,68 @@ def worker_main(run_id):
                 processed_slots = set()
                 active_minute_str = current_minute_str
 
-                # Check for Task Updates every minute
+            # --- CHECK DYNAMIC SHIFT (ROLLING ANCHOR) ---
+            shift_triggered = False
+            if SOCKET_RUNNING:
+                for tid, t_meta in TASK_ANCHORS.items():
+                    if t_meta["ref_sym"] and t_meta["ref_sym"] in STATE_MEMORY:
+                        lp = STATE_MEMORY[t_meta["ref_sym"]]['ltp']
+                        ap = t_meta["anchor_price"]
+                        gap = t_meta["gap"]
+                        # Trigger shift if price moves by 6 strikes
+                        if lp > 0 and gap > 0 and abs(lp - ap) >= (6 * gap):
+                            log(f"🔄 Anchor Shift Triggered! {t_meta['ref_sym']} moved from {ap} to {lp}")
+                            shift_triggered = True
+                            break
+
+            # --- CHECK FOR TASK UPDATES / SHIFT REBUILD ---
+            if now.second % 10 == 0: # Only check DB/Hash every 10 sec to save DB calls
                 try:
                     res = sb_mgr.table("worker_tasks").select("*").eq("runner_group", RUNNER_ID).execute()
-                    current_tasks = res.data or []
+                    current_tasks = res.data or[]
                     
-                    # Create a simple hash to check if tasks changed
                     current_tasks_str = json.dumps(current_tasks, sort_keys=True)
                     current_hash = hash(current_tasks_str)
                     
-                    if current_hash != last_tasks_hash:
-                        log(f"🔄 Task List Updated. Found {len(current_tasks)} active tasks.")
+                    if current_hash != last_tasks_hash or shift_triggered:
                         token = get_fyers_token()
                         
                         if not token:
                             log("❌ No valid Fyers token found. Cannot start WebSocket.")
                             stop_websocket()
                         else:
-                            symbols = resolve_symbols(token, current_tasks)
-                            if len(symbols) > 0:
-                                log(f"🎯 Resolved {len(symbols)} unique Fyers symbols. Connecting WS...")
-                                start_websocket(token, symbols)
+                            old_tracked = set(ALL_TRACKED_SYMBOLS)
+                            new_tracked = set(resolve_symbols(token, current_tasks))
+                            
+                            # DIFFERENTIAL WEBSOCKET UPDATE (NO GAPS)
+                            if not SOCKET_RUNNING or FS is None:
+                                log(f"🎯 Connecting WS for {len(new_tracked)} symbols...")
+                                start_websocket(token, list(new_tracked))
                             else:
-                                log("⏳ No active symbols mapped. Idling and waiting for tasks...")
-                                stop_websocket()
+                                to_add = list(new_tracked - old_tracked)
+                                to_remove = list(old_tracked - new_tracked)
+                                
+                                if to_add:
+                                    for i in range(0, len(to_add), 50):
+                                        FS.subscribe(symbols=to_add[i:i+50], data_type="SymbolUpdate")
+                                    log(f"📈 Diff Subscribe: added {len(to_add)} new cushion strikes.")
+                                    
+                                if to_remove:
+                                    for i in range(0, len(to_remove), 50):
+                                        try:
+                                            FS.unsubscribe(symbols=to_remove[i:i+50], data_type="SymbolUpdate")
+                                        except Exception:
+                                            pass
+                                    log(f"📉 Diff Unsubscribe: removed {len(to_remove)} deep OTM strikes.")
+                                    
+                                    # Clear stale memory
+                                    for sym in to_remove:
+                                        if sym in STATE_MEMORY: del STATE_MEMORY[sym]
+                                        if sym in MINUTE_BUFFER: del MINUTE_BUFFER[sym]
                                 
                         last_tasks_hash = current_hash
                 except Exception as e:
-                    log(f"❌ Task Fetch Error: {e}")
+                    pass
 
             # --- 10 SECOND SNAPSHOTS ---
             current_slot = now.second // 10
@@ -478,11 +553,8 @@ def worker_main(run_id):
                          MINUTE_BUFFER[sym]['b'].append(None)
                          MINUTE_BUFFER[sym]['s'].append(None)
                     
-                    # Only record if we actually have data
                     if state['ltp'] > 0:
-                        # ----------------------------------------------------
                         # FIX APPLIED HERE: Clean Price using helper function
-                        # ----------------------------------------------------
                         MINUTE_BUFFER[sym]['p'][current_slot] = clean_price(state['ltp'])
                         MINUTE_BUFFER[sym]['v'][current_slot] = state['vol']
                         MINUTE_BUFFER[sym]['o'][current_slot] = state['oi']
