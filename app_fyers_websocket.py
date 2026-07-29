@@ -134,9 +134,18 @@ def download_master():
             except: root = sym.split(':')[1] if ':' in sym else sym
             
             if root not in temp_db:
-                spot_sym = INDEX_MAP.get(root, f"NSE:{root}-EQ")
-                if row['Exch'] == "MCX": spot_sym = "MCX" 
-                elif row['Exch'] == "BSE": spot_sym = f"BSE:{root}"
+                # 1. First, check if it's explicitly defined as an index
+                spot_sym = INDEX_MAP.get(root)
+                
+                # 2. If it's not an index, figure out the equity format based on exchange
+                if not spot_sym:
+                    if row['Exch'] == "MCX": 
+                        spot_sym = "MCX" 
+                    elif row['Exch'] == "BSE": 
+                        spot_sym = f"BSE:{root}"
+                    else: 
+                        spot_sym = f"NSE:{root}-EQ"
+                        
                 temp_db[root] = { "spot": spot_sym, "exch": row['Exch'], "items":[] }
 
             try: exp = int(row['Expiry'])
