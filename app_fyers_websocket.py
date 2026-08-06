@@ -404,9 +404,9 @@ def worker_main(run_id):
     processed_slots = set()
     last_tasks_hash = None
     
-    # 3:35 PM IST Cutoff
+    # 3:45 PM IST Cutoff
     stop_hour = 15
-    stop_min = 35
+    stop_min = 45
 
     while True:
         try:
